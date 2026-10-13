@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>gradforge · 世界顶级自动微分与最优化内核</title>
+<style>
+  :root { --bg:#0f1117; --panel:#171a23; --fg:#e6e9ef; --muted:#9aa4b2;
+          --ok:#3fb950; --bad:#f85149; --accent:#58a6ff; --line:#2a2f3a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; padding:24px; line-height:1.5; }
+  h1 { font-size:22px; margin:0 0 4px; letter-spacing:.5px; }
+  h2 { font-size:15px; color:var(--accent); border-left:3px solid var(--accent);
+       padding-left:8px; margin:24px 0 10px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:16px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:14px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  pre { background:#0b0d12; border:1px solid var(--line); border-radius:8px; padding:12px;
+        overflow:auto; font-size:12.5px; color:#c9d1d9; max-height:340px; margin:0; }
+  canvas { background:#0b0d12; border:1px solid var(--line); border-radius:8px; display:block; }
+  .badge { display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px;
+           background:#1f2630; color:var(--muted); margin-left:6px; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  td,th { text-align:left; padding:4px 8px; border-bottom:1px solid var(--line); }
+  .row { display:flex; gap:18px; flex-wrap:wrap; align-items:flex-start; }
+  .legend span { display:inline-block; width:11px; height:11px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+  button { background:var(--accent); color:#06121f; border:0; border-radius:8px; padding:9px 16px;
+           font-weight:700; cursor:pointer; font-family:inherit; }
+  button:active { transform:translateY(1px); }
+</style>
+</head>
+<body>
+<h1>✦ gradforge</h1>
+<div class="sub">世界顶级自动微分 + 最优化内核 · 零依赖 · 浏览器/Node 双端可跑 · 作者 晨星</div>
+
+<button id="run">▶ 运行浏览器内自检 + 训练</button>
+
+<h2>① 可验证不变量自检 <span class="badge">verification-first</span></h2>
+<div id="tests" class="card">点击上方按钮运行…</div>
+
+<h2>② XOR 决策边界 <span class="badge">MLP 2→8→1 · tanh · Adam</span></h2>
+<div class="row">
+  <div>
+    <canvas id="boundary" width="320" height="320"></canvas>
+    <div class="legend" style="font-size:12px;margin-top:6px;color:var(--muted)">
+      <span style="background:#3b82f6"></span>预测 0
+      <span style="background:#f87171;margin-left:12px"></span>预测 1
+      <span style="background:#fff;border-radius:50%"></span>训练点
+    </div>
+  </div>
+  <div style="flex:1;min-width:260px">
+    <div>训练损失曲线</div>
+    <canvas id="loss" width="380" height="180"></canvas>
+    <div id="xormeta" class="sub" style="margin-top:8px"></div>
+  </div>
+</div>
+
+<h2>③ 学习率探测 (LR Range Test)</h2>
+<div class="card"><canvas id="lr" width="700" height="200"></canvas>
+  <div class="sub" style="margin-top:8px">损失随学习率指数增长而下降→上升的拐点，即最优 LR 区间。</div>
+</div>
+
+<h2>④ 引擎导出 (可直接复制使用)</h2>
+<pre id="api">const GF = GradForge;
+const { Value, MLP, Adam, newtonCG, gradCheck } = GF;
+// 1) 自动微分
+const a = new Value(2), b = new Value(-3);
+const y = a.mul(b).add(a.pow(2)); y.backward();
+console.log(a.grad, b.grad);            // 1, 4   (解析梯度)
+// 2) 训练一个 MLP
+const net = new MLP([2,8,1], 42, 'tanh');
+const opt = new Adam(net.parameters(), 0.05);
+// ... 前向 + backward + opt.step()
+// 3) 二阶 Newton-CG (Hessian-free)
+newtonCG(lossFn, params);              // 二次收敛, 免逆矩阵</pre>
+
+<script src="gradforge.js"></script>
+<script>
+const GF = GradForge;
+const { Value, V, MLP, softmaxCrossEntropy, numericalHVP, newtonCG, gradCheck,
+        Adam, lrRangeTest } = GF;
+
+function log(msg, cls) {
+  const d = document.getElementById('tests');
+  const line = document.createElement('div');
+  if (cls) line.className = cls;
+  line.innerHTML = msg;
+  d.appendChild(line);
+}
+
+function runTests() {
+  document.getElementById('tests').innerHTML = '';
+  let pass = 0, fail = 0;
+  const ok = (n, c, e='') => { if (c) { pass++; log('✅ '+n+' '+e, 'ok'); }
+                               else { fail++; log('❌ '+n+' '+e, 'bad'); } };
+
+  // [1] 一阶梯度校验 MLP(MSE)
+  {
+    const mlp = new MLP([2,6,1], 7, 'tanh'); const P = mlp.parameters();
+    const data = [{x:[0,0],y:0},{x:[0,1],y:1},{x:[1,0],y:1},{x:[1,1],y:0}];
+    const lossFn = () => { let s=V(0); for (const d of data){ const o=mlp.forward(d.x)[0];
+      const e=o.sub(V(d.y)); s=s.add(e.mul(e)); } return s; };
+    const r = gradCheck(lossFn, P, 1e-5, 1e-4);
+    ok('一阶梯度校验 MLP(MSE)', r.pass, 'maxRelErr='+r.maxRel.toExponential(2));
+  }
+  // [1b] softmaxCrossEntropy
+  {
+    const lg = [V(0.3), V(-0.2), V(1.1)];
+    const r = gradCheck(() => softmaxCrossEntropy(lg,2), lg, 1e-5, 1e-4);
+    ok('一阶梯度校验 softmaxCE', r.pass, 'maxRelErr='+r.maxRel.toExponential(2));
+  }
+  // [2] 二阶 HVP
+  {
+    const x=V(1.5), y=V(-0.8), a=3, b=2;
+    const f = () => x.mul(x).mul(V(a*0.5)).add(y.mul(y).mul(V(b*0.5)));
+    const hvp = numericalHVP(f, [x,y], [1,-1], 1e-4);
+    const rel = Math.max(Math.abs(hvp[0]-a)/Math.abs(a), Math.abs(hvp[1]+b)/Math.abs(b));
+    ok('二阶 HVP ≈ Hessian·v', rel<1e-4, 'relErr='+rel.toExponential(2));
+  }
+  // [3] Newton 二次收敛
+  {
+    const p=[V(0.5),V(0.4)];
+    const f=()=>p[0].mul(p[0]).mul(V(0.5)).add(p[0].pow(4).mul(V(0.1)))
+      .add(p[1].mul(p[1]).mul(V(0.5))).add(p[1].pow(4).mul(V(0.1)));
+    const hist=newtonCG(f,p,{maxIter:12,cgIters:20});
+    const last=hist[hist.length-1].gradNorm;
+    ok('Newton-CG 收敛至极小点', last<1e-6, 'err≈'+last.toExponential(2)+' iters='+hist.length);
+  }
+  log('<br><b>结果: '+pass+' ✅ / '+fail+' ❌</b>');
+  return pass+fail>0 && fail===0;
+}
+
+// XOR 训练 + 可视化
+function trainXOR() {
+  const mlp = new MLP([2,8,1], 42, 'tanh'); const P = mlp.parameters();
+  const opt = new Adam(P, 0.05);
+  const X=[[0,0],[0,1],[1,0],[1,1]], Y=[0,1,1,0];
+  const lossHist=[];
+  for (let it=0; it<2000; it++){
+    GF.zeroGrads(P); let s=V(0);
+    for (let i=0;i<4;i++){ const o=mlp.forward(X[i])[0]; const e=o.sub(V(Y[i])); s=s.add(e.mul(e)); }
+    lossHist.push(s.data/4); s.backward(); opt.step();
+  }
+  const finalLoss = lossHist[lossHist.length-1];
+  drawBoundary(mlp); drawLoss(lossHist);
+  let correct=0; X.forEach((x,i)=>{ if (Math.round(mlp.forward(x)[0].data)===Y[i]) correct++; });
+  document.getElementById('xormeta').innerHTML =
+    '最终 MSE = '+finalLoss.toExponential(2)+' · 准确率 = '+correct+'/4';
+}
+
+function drawBoundary(mlp){
+  const c=document.getElementById('boundary'), g=c.getContext('2d');
+  const N=64, W=c.width, cell=W/N;
+  for (let i=0;i<N;i++) for (let j=0;j<N;j++){
+    const x=[i/(N-1), j/(N-1)]; const p=mlp.forward(x)[0].data;
+    g.fillStyle = p>0.5 ? 'rgba(248,113,113,0.85)' : 'rgba(59,130,246,0.85)';
+    g.fillRect(i*cell, (N-1-j)*cell, cell+1, cell+1);
+  }
+  // 训练点
+  const pts=[[0,0],[0,1],[1,0],[1,1]];
+  g.fillStyle='#fff';
+  for (const [px,py] of pts){ g.beginPath();
+    g.arc(px*(N-1)*cell+cell/2, (N-1-py)*(N-1)*cell+cell/2, 4, 0, 7); g.fill(); }
+}
+function drawLoss(hist){
+  const c=document.getElementById('loss'), g=c.getContext('2d');
+  const W=c.width, H=c.height; g.clearRect(0,0,W,H);
+  const mx=Math.max(...hist);
+  g.strokeStyle='#58a6ff'; g.lineWidth=2; g.beginPath();
+  hist.forEach((v,i)=>{ const x=i/(hist.length-1)*W, y=H-(v/mx)*(H-10)-5;
+    i?g.lineTo(x,y):g.moveTo(x,y); });
+  g.stroke();
+}
+function drawLR(){
+  const c=document.getElementById('lr'), g=c.getContext('2d');
+  const W=c.width,H=c.height; g.clearRect(0,0,W,H);
+  const X=[[0,0],[0,1],[1,0],[1,1]],Y=[0,1,1,0];
+  const mlp=new MLP([2,4,1],7,'tanh'); const P=mlp.parameters();
+  const res=lrRangeTest(()=>{ let s=V(0); for(let i=0;i<4;i++){ const o=mlp.forward(X[i])[0];
+    const e=o.sub(V(Y[i])); s=s.add(e.mul(e)); } return s; }, P, {minLR:1e-4,maxLR:1,steps:60});
+  const lrs=res.map(r=>Math.log10(r.lr)), ls=res.map(r=>r.loss);
+  const mn=Math.min(...ls), mx=Math.max(...ls);
+  g.strokeStyle='#3fb950'; g.lineWidth=2; g.beginPath();
+  res.forEach((r,i)=>{ const x=(lrs[i]-lrs[0])/(lrs[lrs.length-1]-lrs[0])*W;
+    const y=H-((r.loss-mn)/(mx-mn))*(H-20)-10; i?g.lineTo(x,y):g.moveTo(x,y); });
+  g.stroke();
+  // ✓ 拐点标注
+  let bi=0,best=1e9; res.forEach((r,i)=>{ if(r.loss<best){best=r.loss;bi=i;} });
+  g.fillStyle='#f85149'; g.font='12px monospace';
+  g.fillText('最优 LR ≈ '+res[bi].lr.toExponential(2), 10, 16);
+}
+
+document.getElementById('run').onclick = () => {
+  runTests(); trainXOR(); drawLR();
+};
+// 自动跑一次
+window.addEventListener('load', () => { document.getElementById('run').click(); });
+</script>
+</body>
+</html>
